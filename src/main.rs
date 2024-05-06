@@ -1,4 +1,5 @@
-mod sender;
+pub mod sender;
+pub mod receiver;
 mod messaging;
 mod external;
 mod types;
@@ -12,7 +13,7 @@ use prusti_contracts::*;
 fn connect<A>(addr: A) -> io::Result<TcpStream>
 where A: ToSocketAddrs;
 
-const DATA_SIZE: usize = 1;
+pub const DATA_SIZE: usize = 1;
 
 #[derive(Clone)]
 pub struct Link {
@@ -60,3 +61,15 @@ pub struct Link {
 fn main() {
   
 }
+
+// #[cfg(test)]
+// mod tests {
+//     use crate::sender;
+
+//     use super::sender::*;
+//     use super::receiver::*;
+
+//     fn run_sender() {
+//         sender::
+//     }
+// }

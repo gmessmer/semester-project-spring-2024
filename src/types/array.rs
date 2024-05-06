@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use super::*;
 
 #[derive(Clone)]
@@ -5,8 +7,9 @@ pub struct Array<T> {
     data: Vec<T>,
     len: usize,
 }
-
+type MyResult<T> = crate::types::MyResult<T, String>;
 // TODO: change to linked list for more Prusti support
+
 
 impl<T> Array<T> {
 

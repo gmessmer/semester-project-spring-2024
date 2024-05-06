@@ -2,8 +2,10 @@ use super::*;
 
 #[extern_spec]
 impl<T> std::option::Option<T> {
+
+    #[pure]
     #[requires(self.is_some())]
-    #[ensures(old(self) === Some(result))]
+    // #[ensures(old(self) === Some(result))]
     pub fn unwrap(self) -> T;
     
     #[pure]
