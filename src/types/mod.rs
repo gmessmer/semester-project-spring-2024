@@ -3,8 +3,9 @@ use std::fmt::{Debug, Display};
 use super::*;
 
 pub mod array;
+pub mod list;
 pub mod socket;
-
+pub mod messaging;
 // trait ToString {
 //     fn to_string(&self) -> String;
 // }
@@ -31,9 +32,17 @@ where E: Clone {
         !self.is_ok()
     }
 
-    #[pure]
     #[requires(self.is_ok())]
     pub fn unwrap(self) -> T {
+        match self {
+            MyResult::Value(value) => value,
+            MyResult::Error(e) => unreachable!(),
+        }
+    }
+
+    #[pure]
+    #[requires(self.is_ok())]
+    pub fn unwrap_as_ref(&self) -> &T {
         match self {
             MyResult::Value(value) => value,
             MyResult::Error(e) => unreachable!(),
@@ -46,34 +55,5 @@ where E: Clone {
             MyResult::Value(_) => panic!(),
             MyResult::Error(e) => e.clone(),
         }
-    }
-}
-
-pub struct Packet {
-    seq: u8,
-    data: u8,
-}
-
-pub const BYTES_PER_PACKET: usize = 2;
-
-impl Packet {
-    pub fn new(seq: u8, data: u8) -> Self {
-        Packet { seq, data }
-    }
-
-    pub fn marshall(&self) -> [u8; 2] {
-        [self.seq, self.data]
-    }
-
-    pub fn unmarshall(data: [u8; 2]) -> Self {
-        Packet { seq: data[0], data: data[1] }
-    }
-
-    pub fn seq(&self) -> u8 {
-        self.seq
-    }
-
-    pub fn data(&self) -> u8 {
-        self.data
     }
 }

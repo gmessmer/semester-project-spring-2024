@@ -1,52 +1,20 @@
 use prusti_contracts::*;
 
-pub enum Result<T> {
-    Value(T),
-    Error(ReceiverError),
-}
+use crate::types::MyResult;
 
+#[derive(Clone)]
 pub enum ReceiverError {
     SocketError,
     RecvError,
 }
 
-
-impl<T> Result<T> {
-    #[pure]
-    pub fn is_ok(&self) -> bool {
+impl ReceiverError {
+    pub fn to_string(&self) -> String {
         match self {
-            Result::Value(_) => true,
-            Result::Error(_) => false,
+            ReceiverError::SocketError => String::from("SocketError"),
+            ReceiverError::RecvError => String::from("RecvError"),
         }
     }
-
-    #[pure]
-    pub fn is_err(&self) -> bool {
-        !self.is_ok()
-    }
-
-    #[pure]
-    #[requires(self.is_ok())]
-    pub fn unwrap(self) -> T {
-        match self {
-            Result::Value(value) => value,
-            Result::Error(_) => panic!(),
-        }
-    }
-
-    #[requires(self.is_err())]
-    pub fn unwrap_err(self) -> ReceiverError {
-        match self {
-            Result::Value(_) => panic!(),
-            Result::Error(e) => e,
-        }
-    }
-
-    // #[ensures(result.is_ok() == res.is_ok())]
-    // pub fn from(res: io::Result<T>) -> Self {
-    //     match res {
-    //         Ok(value) => Result::Value(value),
-    //         Error(err) => Result::Error(err.to_string()),
-    //     }
-    // }
 }
+
+pub type Result<T> = MyResult<T, ReceiverError>;

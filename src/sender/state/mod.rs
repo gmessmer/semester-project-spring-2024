@@ -9,10 +9,10 @@ use prusti_contracts::*;
 use rand::{random, seq};
 use crate::types::socket::{Socket, SocketError};
 use crate::DATA_SIZE;
-use crate::types::MyResult;
-use self::error::Result::{self, *};
+use crate::types::{MyResult, messaging::Packet};
+use self::error::Result;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum SenderError {
     SendError{data: u8},
     SocketError,
@@ -20,6 +20,20 @@ pub enum SenderError {
     IllegalState,
     Timeout,
     BadTimeoutInput,
+}
+
+pub struct Error {
+  kind: ErrorKind,
+  pkt: Option<Packet>
+}
+
+pub enum ErrorKind {
+  SendError,
+  SocketError,
+  NoResponse,
+  IllegalState,
+  Timeout,
+  BadTimeoutInput,
 }
 
 use SenderError::*;
@@ -49,27 +63,21 @@ pub fn connect(remote_addr: String) -> Result<Ready> {
   let socket = Socket::connect(remote_addr);
   match socket {
     MyResult::Value(socket) => {
-      let seq = random::<u8>();
-      Value(Ready {seq, socket})
+      Result::Value(Ready {seq: 0, socket})
     },
-    MyResult::Error(_) => Error(SocketError)
+    MyResult::Error(_) => Result::Error(SocketError)
   }
 }
 
 
 impl Ready {
-  #[ensures(result.is_ok() ==> snap(&self).socket.nsent() + 1 == result.unwrap().socket.nsent())]
+  // #[ensures(result.is_ok() ==> snap(&self).socket.nsent() + 1 == result.unwrap().socket.nsent())]
   pub fn send(mut self, data: u8) -> Result<Pending> {
-    let res = self.socket.send(data);
+    let pkt = Packet {seq: self.seq, data};
+    let res = self.socket.send_pkt(&pkt);
     match res {
-      MyResult::Value(bs) => {
-        if bs == DATA_SIZE {
-          Value(Pending {seq: self.seq, socket: self.socket, data})
-        } else {
-          Error(SendError{data})
-        }
-      },
-      MyResult::Error(_) => Error(SendError{data})
+      MyResult::Value(()) => Result::Value(Pending {seq: self.seq, socket: self.socket, data}),
+      MyResult::Error(_) => Result::Error(SendError{data})
     }
   }
 }
@@ -79,13 +87,13 @@ impl Pending {
   // #[ensures(result.is_ok() ==> result.unwrap().socket.nrecv() == snap(&self).socket.nrecv() + 1)]
   //$$ Delivered
   // #[ensures(result[0].is_ok() && result[1] ==> result[0].unwrap().socket.nrecv() == snap(&self).socket.nrecv() + 1)]
-  #[ensures(result[0].is_ok() && result[1] ==> snap(&self).seq == (result[0].seq + 1) % std::u8::MAX)]
+  #[ensures(result.0.is_ok() && result.1 ==> snap(&self).seq + 1 == result.0.unwrap_as_ref().seq)]
   //$$ Timeout
   // #[ensures(result[0].is_ok() && !result[1] ==> result[0].unwrap().socket.nrecv() == snap(&self).socket.nrecv())]
-  #[ensures(result[0].is_ok() && !result[1] ==> snap(&self).seq == result[0].seq)]
+  #[ensures(result.0.is_ok() && !result.1 ==> snap(&self).seq == result.0.unwrap_as_ref().seq)]
   //$$ Error
   // Might add something to socket state to check if it is in illegal state
-  #[ensures(!result[0].is_ok() ==> result[0].unwrap().socket.nrecv() == snap(&self).socket.nrecv())]
+  // #[ensures(!result.0.is_ok() ==> result.0.unwrap().socket.nrecv() == snap(&self).socket.nrecv())]
 
   // Define named predicate for result[0].unwrap().socket.nrecv() == snap(&self).socket.nrecv() + 1) and 
   // result[0].unwrap().socket.nrecv() == snap(&self).socket.nrecv()) so that it can be parsed
@@ -99,32 +107,35 @@ impl Pending {
     // Or could introduce a struct Timeout that implements a trait same as Ready MIGHT BE THE BEST OPTION
     // BUT hard for Prusti specification,
     // TBD 
+    if timeout.as_millis() <= 0 {
+      // In that case, didn't wait at all
+      return (Result::Value(Ready {socket: self.socket, seq: self.seq}), false);
+    }
+
     let r = self.socket.set_read_timeout(timeout);
     if r.is_err() {
-      return (Error(BadTimeoutInput), false);
+      return (Result::Error(BadTimeoutInput), false);
     }
-    let seq = self.seq.clone();
+
+    let next_seq = self.seq + 1;
+    let seq = self.seq;
     let t0 = std::time::Instant::now();
-    let res = self.socket.recv();
+    let res = self.socket.recv_pkt();
+
     match res {
-      MyResult::Value(n) => {
-        if n == seq {
-          let next_seq = (seq + 1) % std::u8::MAX;
-          (Value(Ready {socket: self.socket, seq: next_seq}), true)
+      MyResult::Value(pkt) => {
+        if pkt.seq == seq {
+          (Result::Value(Ready {socket: self.socket, seq: next_seq}), true)
         } else {
           let delta = std::time::Instant::now().duration_since(t0);
           let timeout1 = timeout - delta;
-          if timeout1.as_millis() > 0 {
-            self.wait_deliver(timeout1)
-          } else {
-            (Value(Ready {socket: self.socket, seq}), false)
-          }
+          self.wait_deliver(timeout1)
         }
       },
       MyResult::Error(SocketError::Timeout) => {
-        (Value(Ready {socket: self.socket, seq}), false)
+        (Result::Value(Ready {socket: self.socket, seq}), false)
       },
-      MyResult::Error(_) => (Error(SenderError::NoResponse), false)
+      MyResult::Error(_) => (Result::Error(SenderError::NoResponse), false)
     }
   }
 }
@@ -146,6 +157,8 @@ impl SenderError {
 mod tests {
   use std::{io::{Read, Write}, net::TcpListener, thread, time::Duration};
 
+use crate::types::socket::ServerSocket;
+
 use super::*;
 
   #[test]
@@ -153,35 +166,49 @@ use super::*;
     let remote_addr = "localhost:8080".to_string();
     print!("Connecting to {}\n", remote_addr);
     let tj = thread::spawn(|| {
-      let listener = TcpListener::bind("localhost:8080").unwrap();
-      let (mut stream, addr) = listener.accept().unwrap();
-      print!("Accepted connection from {}\n", addr);
-      let mut buffer = [0; 1];
-      let n = stream.read(&mut buffer);
-      if n.is_err() {
-        panic!("Error reading...\n")
-      }
-      print!("Received {}\n", buffer[0]);
-      stream.write(&buffer);
-      print!("Sent ACK\n");
+      run_receiver(1, Duration::from_secs(3))
     });
     thread::sleep(Duration::from_secs(2));
-    let res = connect(remote_addr);
+    let res = connect(remote_addr).unwrap();
+    let seq = res.seq;
     print!("Connected\n");
     let data = 1;
-    let res = res.unwrap().send(data);
+    let res = res.send(data);
     match res {
-      Value(pending) => {
-        print!("Sent data {}\n", data);
+      Result::Value(pending) => {
+        print!("Sent data {} with seq {}\n", data, seq);
         match pending.wait_deliver(Duration::from_secs(10)) {
-          (Value(ready), true) => print!("Data delivered, terminating sender...\n"),
-          (Value(ready), false) => print!("Timeout, resending required...\n"),
+          (Result::Value(ready), true) => print!("Data delivered, terminating sender...\n"),
+          (Result::Value(ready), false) => print!("Timeout, resending required...\n"),
           _ => print!("Other error....\n"),
         }
       },
-      Error(e) => print!("Error when sending...\n")
+      Result::Error(e) => print!("Error when sending...\n")
     }
+    tj.join().unwrap();
+  }
     
+  fn run_receiver(step: usize, timeout: Duration) {
+    let mut r = ServerSocket::bind("localhost:8080".to_string())
+      .unwrap()
+      .accept()
+      .unwrap();
+    let res = r.set_read_timeout(timeout);
+    assert!(res.is_ok());
+    print!("Receiver ready\n");
+    for _ in 0..step {
+      let res = r.recv_pkt();
+      match res {
+        MyResult::Value(pkt) => {
+          print!("Received: {}\n", pkt.to_string());
+          let response_pkt = pkt.to_ack();
+          r.send_pkt(&response_pkt).unwrap();
+          print!("Sent ACK for data {}\n", pkt.data);
+        },
+        MyResult::Error(e) => print!("Error receving data: {}\n", e.to_string())
+      }
+    }
+  }
     
     // match res {
     //   Value(ready) => {
@@ -199,7 +226,5 @@ use super::*;
     //   },
     //   Error(e) => panic!("Error: {}", e.to_string())
     // }
-    tj.join().unwrap();
   }
-}
 

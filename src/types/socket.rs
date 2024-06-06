@@ -1,19 +1,20 @@
+use std::io::ErrorKind;
 use std::time::Duration;
-
-use self::messaging::Message;
+use list::*;
+use self::messaging::Packet;
 
 use super::{*};
 use super::array::Array;
 
 pub struct Socket {
     stream: TcpStream,
-    sent: Array<u8>,
-    received: Array<u8>,
+    pub sent: List<u8>,
+    pub received: List<u8>,
 }
 
 type MyResult<T> = crate::types::MyResult<T, SocketError>;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum SocketError {
     Timeout,
     BufferFull,
@@ -22,99 +23,117 @@ pub enum SocketError {
     DestinationUnreachable,
     SetTimeoutFailed,
     BindError,
-    AcceptError
+    AcceptError 
 }
 
+impl SocketError {
+    pub fn to_string(&self) -> String {
+        match self {
+            SocketError::Timeout => "Timeout".to_string(),
+            SocketError::BufferFull => "BufferFull".to_string(),
+            SocketError::SendError => "SendError".to_string(),
+            SocketError::RecvError => "RecvError".to_string(),
+            SocketError::DestinationUnreachable => "DestinationUnreachable".to_string(),
+            SocketError::SetTimeoutFailed => "SetTimeoutFailed".to_string(),
+            SocketError::BindError => "BindError".to_string(),
+            SocketError::AcceptError => "AcceptError".to_string(),
+        }
+    }
+}
+
+use list::List;
 use SocketError::*;
 impl Socket {
-    #[ensures(result.is_ok() ==> result.unwrap().sent.len() == 0)]
-    #[ensures(result.is_ok() ==> result.unwrap().received.len() == 0)]
+    #[ensures(result.is_ok() ==> result.unwrap_as_ref().sent.len() == 0)]
+    #[ensures(result.is_ok() ==> result.unwrap_as_ref().received.len() == 0)]
     pub fn connect(dest: String) -> MyResult<Socket> {
         let stream = TcpStream::connect(dest);
         match stream {
-            Ok(stream) => MyResult::Value(Socket { stream, sent: Array::new(), received: Array::new()}),
+            Ok(stream) => MyResult::Value(Socket { stream, sent: List::new(), received: List::new()}),
             Err(e) => MyResult::Error(DestinationUnreachable),
         }
     }
 
-    pub fn send_msg(&mut self, pkt: Packet) -> MyResult<()> {
-        let res = self.stream.write(&pkt.marshall());
-        match res {
-            Ok(BYTES_PER_PACKET) => MyResult::Value(()),
-            _ => MyResult::Error(SendError), 
+    /// Send a packet to the underlying stream.
+    /// A value of type `()` is returned if the packet is successfully sent.
+    /// Otherwise, an error is returned:
+    ///    1. SendError: If the write operation fails.
+    #[ensures(result.is_ok() ==> self.sent.contains(pkt.seq))]
+    pub fn send_pkt(&mut self, pkt: &Packet) -> MyResult<()> {
+        // let res = self.stream.write(&pkt.marshall());
+        // match res {
+        //     Ok(BYTES_PER_PACKET) => MyResult::Value(()),
+        //     _ => MyResult::Error(SendError), 
+        // }
+        match self.send(&pkt.marshall()) {
+            MyResult::Value(_) => {
+                self.sent.push(pkt.seq);
+                MyResult::Value(())
+            },
+            MyResult::Error(e) => MyResult::Error(e),
         }
     }
 
-    pub fn recv_msg(&mut self, pkt: Packet) -> MyResult<Packet> {
+    pub fn send(&mut self, bytes: &[u8]) -> MyResult<()> {
+        let res = self.stream.write(bytes);
+        match res {
+            Ok(n) => 
+                if n == bytes.len() {
+                    MyResult::Value(())
+                } else {
+                    MyResult::Error(SendError)
+                },
+            _ => MyResult::Error(SendError),
+        }
+    }
+
+    pub fn recv(&mut self, bytes: &mut [u8]) -> MyResult<()> {
+        let res = self.stream.read(bytes);
+        match res {
+            Ok(n) => 
+                if n == bytes.len() {
+                    MyResult::Value(())
+                } else {
+                    MyResult::Error(RecvError)
+                },
+            Err(e) => match e.kind() {
+                ErrorKind::WouldBlock => MyResult::Error(Timeout),
+                ErrorKind::TimedOut => MyResult::Error(Timeout),
+                _ => MyResult::Error(RecvError),
+            },
+            _ => MyResult::Error(RecvError),
+        }
+    }
+
+    /// Receive a packet from the underlying stream.
+    /// A value of type `Packet` is returned if a packet is successfully received.
+    /// Otherwise, an error is returned:
+    ///     1. Timeout: If the read operation takes longer than the timeout duration.
+    ///     2. RecvError: If the read operation fails for any other reason.
+    #[ensures(result.is_ok() ==> self.received.contains(result.unwrap_as_ref().seq))]
+    pub fn recv_pkt(&mut self) -> MyResult<Packet> {
         let mut buffer = [0; 2];
         let result = self.stream.read(&mut buffer);
         match result {
-            Ok(n) => {
-                if n == 0 {
-                    MyResult::Error(Timeout)
-                } else if n == BYTES_PER_PACKET {
-                    let pkt = Packet::unmarshall(buffer);
-                    MyResult::Value(pkt)
-                } else {
-                    MyResult::Error(RecvError)
-                }
+            Ok(BYTES_PER_PACKET) => {
+                let pkt = Packet::unmarshall(buffer);
+                self.received.push(pkt.seq);
+                MyResult::Value(pkt)
             },
-            Err(e) => MyResult::Error(RecvError),
-        }
-    }
-
-    #[ensures(result.is_ok() ==> self.sent.len() == old(self.sent.len()) + 1)]
-    #[ensures(self.received.len() == old(self.received.len()))]
-    #[ensures(!result.is_ok() ==> self.sent.len() == old(self.sent.len()))]
-    pub fn send(&mut self, data: u8) -> MyResult<usize> {
-        let result = self.stream.write(&[data]);
-        match result {
-            Ok(n) => {
-                match self.sent.push(data) {
-                    MyResult::Value(_) => MyResult::Value(n),
-                    MyResult::Error(_) => MyResult::Error(BufferFull),
-                }
+            Err(e) => match e.kind() {
+                ErrorKind::WouldBlock => MyResult::Error(Timeout),
+                ErrorKind::TimedOut => MyResult::Error(Timeout),
+                _ => MyResult::Error(RecvError),
             },
-            Err(e) => MyResult::Error(SendError),
+            _ => MyResult::Error(RecvError),
         }
-    }
-
-    /// Receive a single byte
-    #[ensures(result.is_ok() ==> self.received.len() == old(self.received.len()) + 1)]
-    // #[ensures(result.is_ok() ==> self.received.last().unwrap() == result.unwrap())]
-    // ensure contains??
-    pub fn recv(&mut self) -> MyResult<u8> {
-        let mut buffer = [0; 1];
-        let result = self.stream.read(&mut buffer);
-        match result {
-            Ok(n) => {
-                if n == 0 {
-                    return MyResult::Error(Timeout);
-                }
-                match self.received.push(buffer[0]) {
-                    MyResult::Value(_) => MyResult::Value(buffer[0]),
-                    MyResult::Error(_) => MyResult::Error(BufferFull),
-                }
-            },
-            Err(e) => MyResult::Error(RecvError),
-        }
-    }
-
-    #[pure]
-    pub fn nsent(&self) -> usize {
-        self.sent.len()
-    }
-
-    #[pure]
-    pub fn nrecv(&self) -> usize {
-        self.received.len()
     }
 
     pub fn set_read_timeout(&self, timeout: Duration) -> MyResult<()>{
         let result = self.stream.set_read_timeout(Some(timeout));
         match result {
             Ok(_) => MyResult::Value(()),
-            Err(e) => MyResult::Error(SetTimeoutFailed),
+            Err(_) => MyResult::Error(SetTimeoutFailed),
         }
     }
 
@@ -122,14 +141,14 @@ impl Socket {
         let result = self.stream.set_write_timeout(Some(timeout));
         match result {
             Ok(_) => MyResult::Value(()),
-            Err(e) => MyResult::Error(SetTimeoutFailed),
+            Err(_) => MyResult::Error(SetTimeoutFailed),
         }
     }
 
 }
 
 pub struct ServerSocket {
-    listener: TcpListener,
+    pub listener: TcpListener,
     read_timeout: Option<Duration>,
     write_timeout: Option<Duration>,
 }
@@ -149,7 +168,7 @@ impl ServerSocket {
         let stream = self.listener.accept();
         match stream {
             Ok((stream, _)) => {
-                let s = Socket { stream, sent: Array::new(), received: Array::new()};
+                let s = Socket { stream, sent: List::new(), received: List::new()};
                 if self.read_timeout.is_some() {
                     let err = s.set_read_timeout(self.read_timeout.unwrap());
                     if err.is_err() {
@@ -168,14 +187,12 @@ impl ServerSocket {
         }
     }
 
-    pub fn set_read_timeout(&mut self, timeout: Duration) -> &ServerSocket {
+    pub fn set_read_timeout(&mut self, timeout: Duration) {
         self.read_timeout = Some(timeout);
-        self
     }
 
-    pub fn set_write_timeout(&mut self, timeout: Duration) -> &ServerSocket{
+    pub fn set_write_timeout(&mut self, timeout: Duration) {
         self.write_timeout = Some(timeout);
-        self
     }
 
 }
@@ -184,48 +201,56 @@ impl ServerSocket {
 mod tests {
     use std::{thread, time::Duration};
 
-    use crate::types::{socket::Socket, MyResult};
+    use crate::types::{socket::Socket, MyResult, messaging::Packet};
 
     use super::ServerSocket;
 
     #[test]
-    pub fn test_timeout() {
+    pub fn test_send_recv() {
         let tr = thread::spawn(|| {
-            run_server()
+            run_server(1)
         });
-        Socket::connect("localhost:8080".to_string()).unwrap()
-            .send(12).unwrap();
+        run_client(false);
         tr.join().unwrap();
     }
 
-    pub fn run_server() {
-        let mut s = ServerSocket::bind("localhost:8080".to_string()).unwrap()
-            .accept().unwrap();
-        thread::sleep(Duration::from_secs(2));
+    #[test]
+    pub fn test_recv_timeout() {
+        let tr = thread::spawn(|| {
+            run_server(2)
+        });
+        run_client(true);
+        tr.join().unwrap();
+    }
+
+    pub fn run_server(step: usize) {
+        let server_socket = ServerSocket::bind("localhost:8080".to_string());
+        let mut s = server_socket.unwrap().accept().unwrap();
         s.set_read_timeout(Duration::from_secs(3));
-        let r = s.recv();
-        match r {
-            MyResult::MyResult::Value(v) => {
-                print!("Received: {}\n", v);
-                print!("Server done")
-            },
-            MyResult::MyResult::Error(e) => print!("Error: {:?}\n", e),
-        }
-        let r = s.recv();
-        match r {
-            MyResult::MyResult::Value(v) => {
-                print!("Received: {}\n", v);
-                print!("Server done\n")
-            },
-            MyResult::MyResult::Error(e) => print!("Error: {:?}\n", e),
+        for _i in 0..step {
+            let mut r = s.recv_pkt();
+            match r {
+                MyResult::Value(pkt) => {
+                    print!("Received: {}\n", pkt.to_string());
+                    print!("Server done\n")
+                },
+                MyResult::Error(e) => print!("Error: {:?}\n", e.to_string()),
+            }
         }
         
     }
 
-    pub fn run_client() {
+    pub fn run_client(wait_before_send: bool) {
         let mut client = Socket::connect("localhost:8080".to_string()).unwrap();
-        // let r = client.send(1).unwrap();
-        // print!("Sent: {}\n", r);
-        // print!("Client done");
+        if wait_before_send {
+            thread::sleep(Duration::from_secs(5));
+        }
+        let pkt = Packet::new(1, 2);
+        let r = client.send_pkt(&pkt).unwrap();
+        print!("Sent: {}\n", pkt.to_string());
+        
+        let pkt2 = Packet::new(2, 2);
+        let r = client.send_pkt(&pkt2).unwrap();
+        print!("Sent: {}\n", pkt2.to_string());
     }
 }
